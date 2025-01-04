@@ -94,9 +94,3 @@ pub const Expr = union(enum) {
         }
     }
 };
-
-pub inline fn get_rsp() usize {
-    return asm volatile ("mov %rsp, %[rax]"
-        : [rax] "={rax}" (-> u64),
-    );
-}

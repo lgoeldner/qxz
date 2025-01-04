@@ -3,21 +3,43 @@ const BumpAlloc = @import("BumpAlloc.zig");
 const trace = @import("trace.zig");
 const assert = std.debug.assert;
 const Self = @This();
+const NURSERY_SIZE = 5 * 1024;
+
+const ObjectSet = std.ArrayHashMap(usize, struct {}, struct {
+    pub fn hash(_: *const @This(), key: usize) u32 {
+        return @intCast(key);
+    }
+
+    pub fn eql(_: *const @This(), a: usize, b: usize, _: usize) bool {
+        return a == b;
+    }
+}, false);
 
 pub const Error = BumpAlloc.Error;
 pub const Tracer = trace.Tracer;
 
-const NURSERY_SIZE = 5 * 1024;
+threadlocal var thread_stack_base: usize = undefined;
+
 nursery: BumpAlloc,
+headers: ObjectSet,
 
 pub fn init(ally: std.mem.Allocator) Error!Self {
+    const stack_start = switch (@import("builtin").os.tag) {
+        .windows => std.os.windows.teb().NtTib.StackBase,
+        else => @compileError("Cannot get Stack base pointer on this target!"),
+    };
+
+    thread_stack_base = @intFromPtr(stack_start);
+
     return Self{
         .nursery = try BumpAlloc.init(ally, NURSERY_SIZE),
+        .headers = ObjectSet.init(ally),
     };
 }
 
 pub fn deinit(self: *Self) void {
     self.nursery.deinit();
+    self.headers.deinit();
 }
 
 pub const ReflectData = struct {
@@ -50,7 +72,7 @@ const ObjHeader = packed struct {
     // how many generations the object has survived in the current region
     generation_count: u8 = 0,
     size: u32,
-    reflect: ?*const ReflectData,
+    reflect: *const ReflectData,
 };
 
 const _ = std.debug.assert(@alignOf(ObjHeader) == @alignOf(usize) and @sizeOf(ObjHeader) == 2 * @sizeOf(usize));
@@ -98,10 +120,11 @@ pub fn newDynamic(self: *Self, header: anytype, data: []const u8) Error!*@TypeOf
     const size = @sizeOf(ObjHeader) + @sizeOf(H) + data.len;
     const ptr = try self.nursery.bump(size);
     const headerptr = @as([*]ObjHeader, @ptrCast(@alignCast(ptr)));
+    const reflect_data = getReflectData(H);
     headerptr[0] = ObjHeader{
         .size_class = ObjTy.DynamicSize,
         .size = @intCast(@sizeOf(H) + data.len),
-        .reflect = getReflectData(H),
+        .reflect = reflect_data,
     };
 
     const objheaderptr: *H = @ptrCast(&headerptr[1]);
@@ -109,35 +132,51 @@ pub fn newDynamic(self: *Self, header: anytype, data: []const u8) Error!*@TypeOf
     const dataptr = @as([*]u8, @ptrCast(@as([*]H, @ptrCast(objheaderptr)) + 1))[0..data.len];
     @memcpy(dataptr, data);
 
+    if (!self.headers.contains(@intFromPtr(reflect_data))) {
+        try self.headers.putNoClobber(@intFromPtr(reflect_data), .{});
+    }
+
     return objheaderptr;
 }
 
-pub fn new(self: *Self, obj: anytype) Error!*@TypeOf(obj) {
+pub fn new(self: *Self, obj: anytype) !*@TypeOf(obj) {
     const T = @TypeOf(obj);
     const ptr = try self.newRaw(T);
     ptr.* = obj;
     return ptr;
 }
 
-pub fn newRaw(self: *Self, comptime T: type) Error!*T {
+pub fn newRaw(self: *Self, comptime T: type) !*T {
     comptime std.debug.assert(@alignOf(T) <= @alignOf(ObjHeader));
     const size = @sizeOf(ObjHeader) + @sizeOf(T);
     const ptr = try self.nursery.bump(size);
     const headerptr = @as([*]ObjHeader, @ptrCast(@alignCast(ptr)));
 
+    const reflect_data = getReflectData(T);
     headerptr[0] = ObjHeader{
         .size_class = ObjTy.StaticSize,
         .size = @sizeOf(T),
-        .reflect = getReflectData(T),
+        .reflect = reflect_data,
     };
 
     const objptr = &headerptr[1];
-    std.debug.print("header={} {s}\n", .{ @as(*anyopaque, headerptr), headerptr[0].reflect.?.typename });
+
+    if (!self.headers.contains(@intFromPtr(reflect_data))) {
+        try self.headers.putNoClobber(@intFromPtr(reflect_data), .{});
+    }
+
+    std.debug.print("allocated @ {} {s}\n", .{ @as(*anyopaque, headerptr + 1), headerptr[0].reflect.typename });
     return @ptrCast(objptr);
 }
 
 pub fn isGcPtr(self: *Self, ptr: *anyopaque) bool {
-    return self.nursery.contains_ptr(ptr);
+    return std.mem.isAligned(@intFromPtr(ptr), @alignOf(usize)) //
+    and self.nursery.contains_ptr(ptr) //
+    and brk: {
+        const header = @as([*]const ObjHeader, @ptrCast(@alignCast(ptr))) - 1;
+        const reflectptr = header[0].reflect;
+        break :brk self.headers.contains(@intFromPtr(reflectptr));
+    };
 }
 
 pub const AnyReflect = struct {
@@ -159,18 +198,57 @@ pub const AnyReflect = struct {
     }
 };
 
-pub fn reflect(self: *Self, anyptr: *anyopaque) ?AnyReflect {
+pub fn getObjHeader(self: *Self, anyptr: *anyopaque) *const ObjHeader {
     assert(self.isGcPtr(anyptr));
 
     const header = @as([*]const ObjHeader, @ptrCast(@alignCast(anyptr))) - 1;
+    return @ptrCast(header);
+}
 
-    if (header[0].reflect) |reflectdata| {
-        return AnyReflect{
-            .obj = anyptr,
-            .typename = reflectdata.typename,
-            .fmtptr = reflectdata.format,
-        };
-    }
+pub fn reflect(self: *Self, anyptr: *anyopaque) AnyReflect {
+    const reflectdata = self.getObjHeader(anyptr).reflect;
 
-    return null;
+    return AnyReflect{
+        .obj = anyptr,
+        .typename = reflectdata.typename,
+        .fmtptr = reflectdata.format,
+    };
+}
+
+inline fn initStackTop() void {
+    if (thread_stack_base == null)
+        thread_stack_base = get_rsp();
+}
+
+inline fn get_rsp() usize {
+    return asm volatile (""
+        : [ret] "={rsp}" (-> usize),
+    );
+}
+
+inline fn castSlice(T: type, slice: []u8) []T {
+    std.debug.assert(std.mem.isAligned(@intFromPtr(slice.ptr), @alignOf(T)));
+    const new_len = slice.len / @sizeOf(T);
+    return @as([*]T, @alignCast(@ptrCast(slice.ptr)))[0..new_len];
+}
+
+fn traceRoots(tracer: *trace.Tracer) !void {
+    const stack_bottom = get_rsp();
+
+    const stack_size = thread_stack_base - stack_bottom;
+
+    const stack_slice = castSlice(*anyopaque, @as([*]u8, @ptrFromInt(stack_bottom))[0..stack_size]);
+    try tracer.traceRootRegion(stack_slice);
+}
+
+pub fn fullCollect(self: *Self) !void {
+    var tracer = Tracer.init(self.nursery.alloc, self);
+    defer tracer.deinit();
+
+    // trace roots
+    // first, the stack can contain root pointers
+    try traceRoots(&tracer);
+    std.debug.print("entering dfs!\n", .{});
+
+    try tracer.doDfs();
 }

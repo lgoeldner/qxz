@@ -10,8 +10,7 @@ obj_count: u64 = 0,
 alloc: std.mem.Allocator,
 
 pub inline fn init(alloc: std.mem.Allocator, size: usize) Error!Self {
-    initStackTop();
-    std.debug.print("stack top: {x}\n", .{@intFromPtr(stack_top)});
+    
 
     const start = try alloc.alignedAlloc(u8, @alignOf(usize), size);
 
@@ -44,14 +43,6 @@ pub inline fn bump(self: *Self, size: usize) error{OutOfMemory}![]align(ALIGN) u
     self.ptr = @alignCast(@ptrCast(new_aligned_slice.ptr));
     self.obj_count += 1;
     return @alignCast(new_aligned_slice);
-}
-
-threadlocal var stack_top: ?*anyopaque = null;
-fn initStackTop() void {
-    if (stack_top == null)
-        stack_top = asm volatile ("mov %rsp, %[rax]"
-            : [rax] "={rax}" (-> *anyopaque),
-        );
 }
 
 pub fn contains_ptr(self: *Self, ptr: *anyopaque) bool {

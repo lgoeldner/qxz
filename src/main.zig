@@ -3,8 +3,9 @@ const GcAlloc = @import("gc/GcAlloc.zig");
 const lib = @import("root.zig");
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     var alloc = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = alloc.deinit();
+
     var gc = try GcAlloc.init(alloc.allocator());
     defer gc.deinit();
 
@@ -13,20 +14,26 @@ pub fn main() !void {
 
     const hello: []const u8 = "hello";
     const hstr = lib.Str{ .len = hello.len };
-
-    var cons = try gc.new(lib.Cons{
-        .car = .{ .Str = try gc.newDynamic(str, sym) },
+    const next = lib.Expr{ .Cons = try gc.new(lib.Cons{
+        .car = .{ .Str = try gc.newDynamic(hstr, hello) },
         .cdr = .{ .Cons = try gc.new(lib.Cons{
-            .car = .{ .Str = try gc.newDynamic(hstr, hello) },
-            .cdr = .{ .Cons = try gc.new(lib.Cons{
-                .car = .{ .Int = 42 },
-                .cdr = .Nil,
-            }) },
+            .car = .{ .Int = 42 },
+            .cdr = .Nil,
         }) },
+    }) };
+
+    _ = &next;
+
+    const cons = try gc.new(lib.Cons{
+        .car = .{ .Str = try gc.newDynamic(str, sym) },
+        .cdr = next,
     });
 
-    std.debug.print("cons={}\n", .{gc.reflect(cons).?});
-    _ = &cons;
+    std.debug.print("expect to find (next){x} and (cons){x}\n", .{ @as(*const anyopaque, @ptrCast(&next.Cons)), @as(*const anyopaque, @ptrCast(&cons)) });
+    try gc.fullCollect();
+
+    const r = gc.reflect(cons);
+    std.debug.print("{}\n", .{r});
 }
 
 test "simple test" {
