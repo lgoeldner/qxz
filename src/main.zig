@@ -29,10 +29,11 @@ pub fn main() !void {
         .cdr = next,
     });
 
+    std.debug.print("before: &cons={}, \n", .{@as(*const anyopaque, @ptrCast(cons))});
     try gc.fullCollect();
-
+    std.debug.print("after: &cons={}, \n", .{@as(*const anyopaque, @ptrCast(cons))});
     const r = gc.reflect(cons);
-    std.debug.print("{}\n", .{r});
+    std.debug.print("{s}\n", .{r});
 }
 
 test "simple test" {

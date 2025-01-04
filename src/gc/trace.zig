@@ -50,16 +50,17 @@ pub const Tracer = struct {
             if (header.gc_marker == .NotVisited) {
                 header.generation_count += 1;
 
+                std.debug.print("moving a {s} of size: {} ", .{ header.reflect.typename, header.size });
+
                 // copy the object and replace it with a broken heart
                 // pointing at the new object in the copyto nursery.
-                const new_obj_bytes = try self.gc.copyto_nursery.bump(header.size);
 
-                @memcpy(new_obj_bytes, @as([*]const u8, @ptrCast(header))[0..header.size]);
+                const new_obj: *anyopaque = try self.gc.copyObjToToSpace(ptr);
 
-                const new_obj: *anyopaque = self.gc.getObjPtr(@ptrCast(@alignCast(new_obj_bytes)));
-
+                // mark the old object as a broken heart
                 header.gc_marker = .BrokenHeart;
-                @as(**anyopaque, @alignCast(@ptrCast(ptr))).* = new_obj;
+                // add the redirection pointer to the new object
+                @as(**anyopaque, @alignCast(@ptrCast(self.gc.getObjPtr(header)))).* = new_obj;
 
                 // now, trace the potential pointers in the new object
                 const new_header = self.gc.getObjHeader(new_obj);
@@ -68,6 +69,9 @@ pub const Tracer = struct {
 
             // update the pointer
             const new_obj_ptr: **anyopaque = @alignCast(@ptrCast(ptr));
+            std.debug.print("moved {} to {}\n", .{ pair, new_obj_ptr.* });
+
+            std.debug.assert(self.gc.isGcPtr(new_obj_ptr.*));
             pair.src.* = new_obj_ptr.*;
         }
     }

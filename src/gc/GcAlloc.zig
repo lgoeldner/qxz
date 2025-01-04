@@ -192,9 +192,8 @@ pub fn newRaw(self: *Self, comptime T: type) !*T {
 
     const objptr = &headerptr[1];
 
-    if (!self.headers.contains(@intFromPtr(reflect_data))) {
+    if (!self.headers.contains(@intFromPtr(reflect_data)))
         try self.headers.putNoClobber(@intFromPtr(reflect_data), .{});
-    }
 
     std.debug.print("allocated @ {} {s}\n", .{ @as(*anyopaque, headerptr + 1), headerptr[0].reflect.typename });
     return @ptrCast(objptr);
@@ -288,4 +287,14 @@ pub fn fullCollect(self: *Self) !void {
     std.debug.print("entering dfs!\n", .{});
 
     try tracer.doDfs();
+    // swap active and tospace
+}
+
+pub fn copyObjToToSpace(self: *Self, anyptr: *anyopaque) !*anyopaque {
+    const header = self.getObjHeader(anyptr);
+    const size = header.size;
+    const new_bytes = try self.copyto_nursery.bump(size + @sizeOf(ObjHeader));
+
+    @memcpy(new_bytes, @as([*]const u8, @ptrCast(header)));
+    return self.getObjPtr(@alignCast(@ptrCast(new_bytes)));
 }

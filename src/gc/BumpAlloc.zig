@@ -10,8 +10,6 @@ obj_count: u64 = 0,
 alloc: std.mem.Allocator,
 
 pub inline fn init(alloc: std.mem.Allocator, size: usize) Error!Self {
-    
-
     const start = try alloc.alignedAlloc(u8, @alignOf(usize), size);
 
     const top = @as(*u8, @ptrCast(start.ptr + start.len));
@@ -42,6 +40,8 @@ pub inline fn bump(self: *Self, size: usize) error{OutOfMemory}![]align(ALIGN) u
     if (@as(usize, @intFromPtr(new_aligned_slice.ptr)) < @as(usize, @intFromPtr(self.buf.ptr))) return error.OutOfMemory;
     self.ptr = @alignCast(@ptrCast(new_aligned_slice.ptr));
     self.obj_count += 1;
+
+    std.debug.print("bumped {}B at {x}\n", .{ size, @intFromPtr(new_aligned_slice.ptr) });
     return @alignCast(new_aligned_slice);
 }
 
