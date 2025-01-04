@@ -8,7 +8,7 @@ const builtin = @import("builtin");
 
 const ObjectSet = std.ArrayHashMap(usize, struct {}, struct {
     pub fn hash(_: *const @This(), key: usize) u32 {
-        return @intCast(key);
+        return @truncate(key >> 3);
     }
 
     pub fn eql(_: *const @This(), a: usize, b: usize, _: usize) bool {
@@ -63,12 +63,14 @@ pub fn init(ally: std.mem.Allocator) !Self {
 
     return Self{
         .active_nursery = try BumpAlloc.init(ally, NURSERY_SIZE),
+        .copyto_nursery = try BumpAlloc.init(ally, NURSERY_SIZE),
         .headers = ObjectSet.init(ally),
     };
 }
 
 pub fn deinit(self: *Self) void {
     self.active_nursery.deinit();
+    self.copyto_nursery.deinit();
     self.headers.deinit();
 }
 
@@ -200,7 +202,7 @@ pub fn newRaw(self: *Self, comptime T: type) !*T {
 
 pub fn isGcPtr(self: *Self, ptr: *anyopaque) bool {
     return std.mem.isAligned(@intFromPtr(ptr), @alignOf(usize)) //
-    and self.active_nursery.contains_ptr(ptr) //
+    and (self.active_nursery.contains_ptr(ptr) or self.copyto_nursery.contains_ptr(ptr)) //
     and brk: {
         const header = @as([*]const ObjHeader, @ptrCast(@alignCast(ptr))) - 1;
         const reflectptr = header[0].reflect;
@@ -227,11 +229,17 @@ pub const AnyReflect = struct {
     }
 };
 
-pub fn getObjHeader(self: *Self, anyptr: *anyopaque) *const ObjHeader {
+pub fn getObjHeader(self: *Self, anyptr: *anyopaque) *ObjHeader {
     assert(self.isGcPtr(anyptr));
 
-    const header = @as([*]const ObjHeader, @ptrCast(@alignCast(anyptr))) - 1;
+    const header = @as([*]ObjHeader, @ptrCast(@alignCast(anyptr))) - 1;
     return @ptrCast(header);
+}
+
+pub fn getObjPtr(self: *Self, anyheader: *ObjHeader) *anyopaque {
+    const new_ptr: *anyopaque = @ptrCast(@as([*]ObjHeader, @ptrCast(anyheader)) + 1);
+    assert(self.isGcPtr(new_ptr));
+    return new_ptr;
 }
 
 pub fn reflect(self: *Self, anyptr: *anyopaque) AnyReflect {
