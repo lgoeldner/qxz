@@ -4,6 +4,7 @@ const trace = @import("trace.zig");
 const assert = std.debug.assert;
 const Self = @This();
 const NURSERY_SIZE = 5 * 1024;
+const builtin = @import("builtin");
 
 const ObjectSet = std.ArrayHashMap(usize, struct {}, struct {
     pub fn hash(_: *const @This(), key: usize) u32 {
@@ -20,25 +21,54 @@ pub const Tracer = trace.Tracer;
 
 threadlocal var thread_stack_base: usize = undefined;
 
-nursery: BumpAlloc,
+active_nursery: BumpAlloc,
+copyto_nursery: BumpAlloc,
+
 headers: ObjectSet,
 
-pub fn init(ally: std.mem.Allocator) Error!Self {
-    const stack_start = switch (@import("builtin").os.tag) {
+pub fn init(ally: std.mem.Allocator) !Self {
+    const stack_start: *anyopaque = switch (builtin.os.tag) {
         .windows => std.os.windows.teb().NtTib.StackBase,
-        else => @compileError("Cannot get Stack base pointer on this target!"),
+        else => brk: {
+            const s = std.c.pthread_self();
+            const c = struct {
+                pub extern "c" fn pthread_attr_getstack(
+                    attr: *std.c.pthread_attr_t,
+                    stackaddr: **anyopaque,
+                    stacksize: *usize,
+                ) std.c.E;
+
+                pub extern "c" fn pthread_getattr_np(
+                    thread: std.c.pthread_t,
+                    attr: *std.c.pthread_attr_t,
+                ) std.c.E;
+            };
+            var attr: std.c.pthread_attr_t = undefined;
+            var stackaddr: *anyopaque = undefined;
+            var stacksize: usize = undefined;
+
+            if (c.pthread_getattr_np(s, &attr) != .SUCCESS)
+                return error.PthreadGetAttrFailed;
+
+            if (c.pthread_attr_getstack(&attr, &stackaddr, &stacksize) != .SUCCESS)
+                return error.PThreadGetStackFailed;
+
+            std.debug.print("pthread_self={}, stackaddr={}, stacksize={}\n", .{ @intFromPtr(s), stackaddr, stacksize });
+            break :brk @ptrFromInt(@intFromPtr(stackaddr) + stacksize);
+        },
     };
 
     thread_stack_base = @intFromPtr(stack_start);
+    std.debug.print("stack base at {x}\n", .{thread_stack_base});
 
     return Self{
-        .nursery = try BumpAlloc.init(ally, NURSERY_SIZE),
+        .active_nursery = try BumpAlloc.init(ally, NURSERY_SIZE),
         .headers = ObjectSet.init(ally),
     };
 }
 
 pub fn deinit(self: *Self) void {
-    self.nursery.deinit();
+    self.active_nursery.deinit();
     self.headers.deinit();
 }
 
@@ -93,7 +123,6 @@ fn getReflectData(comptime T: type) *const ReflectData {
             }
         }
 
-        // var for static
         var data = ReflectData{
             .format = do_format,
             .typename = @typeName(T),
@@ -118,7 +147,7 @@ pub fn newDynamic(self: *Self, header: anytype, data: []const u8) Error!*@TypeOf
     };
 
     const size = @sizeOf(ObjHeader) + @sizeOf(H) + data.len;
-    const ptr = try self.nursery.bump(size);
+    const ptr = try self.active_nursery.bump(size);
     const headerptr = @as([*]ObjHeader, @ptrCast(@alignCast(ptr)));
     const reflect_data = getReflectData(H);
     headerptr[0] = ObjHeader{
@@ -149,7 +178,7 @@ pub fn new(self: *Self, obj: anytype) !*@TypeOf(obj) {
 pub fn newRaw(self: *Self, comptime T: type) !*T {
     comptime std.debug.assert(@alignOf(T) <= @alignOf(ObjHeader));
     const size = @sizeOf(ObjHeader) + @sizeOf(T);
-    const ptr = try self.nursery.bump(size);
+    const ptr = try self.active_nursery.bump(size);
     const headerptr = @as([*]ObjHeader, @ptrCast(@alignCast(ptr)));
 
     const reflect_data = getReflectData(T);
@@ -171,7 +200,7 @@ pub fn newRaw(self: *Self, comptime T: type) !*T {
 
 pub fn isGcPtr(self: *Self, ptr: *anyopaque) bool {
     return std.mem.isAligned(@intFromPtr(ptr), @alignOf(usize)) //
-    and self.nursery.contains_ptr(ptr) //
+    and self.active_nursery.contains_ptr(ptr) //
     and brk: {
         const header = @as([*]const ObjHeader, @ptrCast(@alignCast(ptr))) - 1;
         const reflectptr = header[0].reflect;
@@ -242,7 +271,7 @@ fn traceRoots(tracer: *trace.Tracer) !void {
 }
 
 pub fn fullCollect(self: *Self) !void {
-    var tracer = Tracer.init(self.nursery.alloc, self);
+    var tracer = Tracer.init(self.active_nursery.alloc, self);
     defer tracer.deinit();
 
     // trace roots

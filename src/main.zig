@@ -29,7 +29,6 @@ pub fn main() !void {
         .cdr = next,
     });
 
-    std.debug.print("expect to find (next){x} and (cons){x}\n", .{ @as(*const anyopaque, @ptrCast(&next.Cons)), @as(*const anyopaque, @ptrCast(&cons)) });
     try gc.fullCollect();
 
     const r = gc.reflect(cons);
