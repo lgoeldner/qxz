@@ -55,7 +55,7 @@ pub const Str = struct {
 
         const after_header = @as([*]u8, @ptrCast(@as([*]Str, @ptrCast(self)) + 1))[0..self.len];
 
-        try writer.print("{s}", .{after_header});
+        try writer.print("len={},{s}", .{ self.len, after_header });
     }
 
     pub fn gcTrace(self: *@This(), tracer: *Gc.Tracer) !void {

@@ -12,7 +12,7 @@ pub fn main() !void {
     const sym: []const u8 = "print";
     const str = lib.Str{ .len = sym.len };
 
-    const hello: []const u8 = "hello";
+    const hello: []const u8 = "hellol";
     const hstr = lib.Str{ .len = hello.len };
     const next = lib.Expr{ .Cons = try gc.new(lib.Cons{
         .car = .{ .Str = try gc.newDynamic(hstr, hello) },
